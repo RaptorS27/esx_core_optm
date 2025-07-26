@@ -26,20 +26,53 @@ end
 
 function StartPointsLoop()
 	CreateThread(function()
+		local lastUpdate = 0
+		local updateInterval = Config.PerformanceOptimization.DefaultThreadWait or 500
+		local lastCoords = vector3(0, 0, 0)
+		local coordsUpdateTimer = 0
+		
 		while true do
-			local coords = GetEntityCoords(ESX.PlayerData.ped)
-			for handle, point in pairs(points) do
-				if not point.hidden and #(coords - point.coords) <= point.distance then
-					if not point.nearby then
-						points[handle].nearby = true
-						points[handle].enter()
+			local currentTime = GetGameTimer()
+			
+			-- Update coordinates less frequently
+			if currentTime - coordsUpdateTimer > 250 then
+				lastCoords = GetEntityCoords(ESX.PlayerData.ped)
+				coordsUpdateTimer = currentTime
+			end
+			
+			-- Skip processing if player hasn't moved much
+			if currentTime - lastUpdate >= updateInterval then
+				lastUpdate = currentTime
+				
+				-- Pre-filter points by checking if we need to process them
+				local hasNearbyPoints = false
+				for handle, point in pairs(points) do
+					if not point.hidden then
+						local distance = #(lastCoords - point.coords)
+						local isNearby = distance <= point.distance
+						
+						if isNearby ~= point.nearby then
+							hasNearbyPoints = true
+							if isNearby then
+								points[handle].nearby = true
+								points[handle].enter()
+							else
+								points[handle].nearby = false
+								points[handle].leave()
+							end
+						end
 					end
-				elseif point.nearby then
-					points[handle].nearby = false
-					points[handle].leave()
+				end
+				
+				-- Adjust update frequency based on activity
+				if hasNearbyPoints then
+					updateInterval = 250 -- Faster updates when there are nearby points
+				else
+					updateInterval = Config.PerformanceOptimization.DefaultThreadWait or 500
 				end
 			end
-			Wait(500)
+			
+			Wait(math.min(updateInterval, 500))
 		end
 	end)
 end

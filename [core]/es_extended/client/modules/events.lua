@@ -293,52 +293,107 @@ function StartServerSyncLoops()
         ---@diagnostic disable-next-line: assign-type-mismatch
         hash = `WEAPON_UNARMED`,
         ammo = 0,
+        lastUpdateTime = 0,
+        config = nil
     }
 
+    -- Cache weapon configs to avoid repeated lookups
+    local weaponConfigCache = {}
+
     local function updateCurrentWeaponAmmo(weaponName)
+        local currentTime = GetGameTimer()
+        -- Rate limit ammo updates to prevent spam
+        if currentTime - currentWeapon.lastUpdateTime < 250 then
+            return
+        end
+        
         local newAmmo = GetAmmoInPedWeapon(ESX.PlayerData.ped, currentWeapon.hash)
 
         if newAmmo ~= currentWeapon.ammo then
             currentWeapon.ammo = newAmmo
+            currentWeapon.lastUpdateTime = currentTime
             TriggerServerEvent("esx:updateWeaponAmmo", weaponName, newAmmo)
         end
     end
 
+    -- Optimized weapon sync thread with better caching and reduced native calls
     CreateThread(function()
+        local lastWeaponCheck = 0
+        local weaponCheckInterval = 500 -- Check weapon changes every 500ms instead of 250ms
+        
         while ESX.PlayerLoaded do
-            currentWeapon.hash = GetSelectedPedWeapon(ESX.PlayerData.ped)
-
-            if currentWeapon.hash ~= `WEAPON_UNARMED` then
-                local weaponConfig = ESX.GetWeaponFromHash(currentWeapon.hash)
-
-                if weaponConfig then
-                    currentWeapon.ammo = GetAmmoInPedWeapon(ESX.PlayerData.ped, currentWeapon.hash)
-
-                    while GetSelectedPedWeapon(ESX.PlayerData.ped) == currentWeapon.hash do
-                        updateCurrentWeaponAmmo(weaponConfig.name)
-                        Wait(1000)
+            local currentTime = GetGameTimer()
+            
+            -- Reduce frequency of weapon checks
+            if currentTime - lastWeaponCheck >= weaponCheckInterval then
+                lastWeaponCheck = currentTime
+                local selectedWeapon = GetSelectedPedWeapon(ESX.PlayerData.ped)
+                
+                -- Only process if weapon actually changed
+                if selectedWeapon ~= currentWeapon.hash then
+                    currentWeapon.hash = selectedWeapon
+                    
+                    if currentWeapon.hash ~= `WEAPON_UNARMED` then
+                        -- Use cached weapon config or fetch and cache it
+                        local weaponConfig = weaponConfigCache[currentWeapon.hash]
+                        if not weaponConfig then
+                            weaponConfig = ESX.GetWeaponFromHash(currentWeapon.hash)
+                            if weaponConfig then
+                                weaponConfigCache[currentWeapon.hash] = weaponConfig
+                            end
+                        end
+                        
+                        currentWeapon.config = weaponConfig
+                        if weaponConfig then
+                            currentWeapon.ammo = GetAmmoInPedWeapon(ESX.PlayerData.ped, currentWeapon.hash)
+                        end
+                    else
+                        currentWeapon.config = nil
                     end
-
-                    updateCurrentWeaponAmmo(weaponConfig.name)
                 end
             end
-            Wait(250)
+            
+            -- Update ammo for current weapon if it exists
+            if currentWeapon.config and currentWeapon.hash == GetSelectedPedWeapon(ESX.PlayerData.ped) then
+                updateCurrentWeaponAmmo(currentWeapon.config.name)
+            end
+            
+            Wait(500) -- Increased wait time for better performance
         end
     end)
 
+    -- Optimized parachute monitoring thread
     CreateThread(function()
         local PARACHUTE_OPENING <const> = 1
         local PARACHUTE_OPEN <const> = 2
+        local lastParachuteCheck = 0
+        local parachuteUpdateSent = false
 
         while ESX.PlayerLoaded do
-            local parachuteState = GetPedParachuteState(ESX.PlayerData.ped)
+            local currentTime = GetGameTimer()
+            
+            -- Check parachute state less frequently
+            if currentTime - lastParachuteCheck >= 1000 then
+                lastParachuteCheck = currentTime
+                local parachuteState = GetPedParachuteState(ESX.PlayerData.ped)
 
-            if parachuteState == PARACHUTE_OPENING or parachuteState == PARACHUTE_OPEN then
-                TriggerServerEvent("esx:updateWeaponAmmo", "GADGET_PARACHUTE", 0)
-
-                while GetPedParachuteState(ESX.PlayerData.ped) ~= -1 do Wait(1000) end
+                if (parachuteState == PARACHUTE_OPENING or parachuteState == PARACHUTE_OPEN) and not parachuteUpdateSent then
+                    TriggerServerEvent("esx:updateWeaponAmmo", "GADGET_PARACHUTE", 0)
+                    parachuteUpdateSent = true
+                    
+                    -- Monitor until parachute is closed
+                    CreateThread(function()
+                        while GetPedParachuteState(ESX.PlayerData.ped) ~= -1 do 
+                            Wait(1000) 
+                        end
+                        parachuteUpdateSent = false
+                    end)
+                elseif parachuteState == -1 then
+                    parachuteUpdateSent = false
+                end
             end
-            Wait(500)
+            
+            Wait(1000) -- Increased wait time since parachute state doesn't change frequently
         end
     end)
 end
@@ -352,44 +407,91 @@ if not Config.CustomInventory and Config.EnableDefaultInventory then
 end
 
 if not Config.CustomInventory then
+    -- Optimized pickup system with spatial indexing and reduced distance calculations
     CreateThread(function()
+        local lastPlayerCoords = vector3(0, 0, 0)
+        local coordsUpdateTimer = 0
+        local closestPickupDistance = 999.0
+        local activePickups = {}
+        
         while true do
-            local Sleep = 1500
-            local playerCoords = GetEntityCoords(ESX.PlayerData.ped)
-            local _, closestDistance = ESX.Game.GetClosestPlayer(playerCoords)
-
-            for pickupId, pickup in pairs(pickups) do
-                local distance = #(playerCoords - pickup.coords)
-
-                if distance < 5 then
-                    Sleep = 0
-                    local label = pickup.label
-
-                    if distance < 1 then
-                        if IsControlJustReleased(0, 38) then
-                            if IsPedOnFoot(ESX.PlayerData.ped) and (closestDistance == -1 or closestDistance > 3) and not pickup.inRange then
+            local currentTime = GetGameTimer()
+            local Sleep = 1000
+            
+            -- Update player coordinates less frequently to reduce CPU usage
+            if currentTime - coordsUpdateTimer > 500 then -- Update every 500ms instead of every frame
+                lastPlayerCoords = GetEntityCoords(ESX.PlayerData.ped)
+                coordsUpdateTimer = currentTime
+                
+                -- Pre-filter pickups by distance to reduce loop iterations
+                activePickups = {}
+                for pickupId, pickup in pairs(pickups) do
+                    local distance = #(lastPlayerCoords - pickup.coords)
+                    if distance < 10 then -- Slightly larger radius for pre-filtering
+                        activePickups[pickupId] = {pickup = pickup, distance = distance}
+                    elseif pickup.inRange then
+                        pickup.inRange = false -- Clear range flag for distant pickups
+                    end
+                end
+            end
+            
+            -- Only check closest pickup to reduce processing
+            local nearbyPickup = nil
+            closestPickupDistance = 999.0
+            
+            for pickupId, data in pairs(activePickups) do
+                if data.distance < closestPickupDistance then
+                    closestPickupDistance = data.distance
+                    nearbyPickup = {id = pickupId, data = data.pickup, distance = data.distance}
+                end
+            end
+            
+            if nearbyPickup and nearbyPickup.distance < 5 then
+                Sleep = 100 -- Faster updates when near pickups
+                local pickup = nearbyPickup.data
+                local label = pickup.label
+                
+                if nearbyPickup.distance < 1.2 then -- Slightly larger pickup radius
+                    if IsControlJustReleased(0, 38) then
+                        -- Cache ped checks to avoid repeated native calls
+                        local isPedOnFoot = IsPedOnFoot(ESX.PlayerData.ped)
+                        if isPedOnFoot and not pickup.inRange then
+                            -- Get closest player distance only when needed
+                            local _, closestDistance = ESX.Game.GetClosestPlayer(lastPlayerCoords)
+                            if closestDistance == -1 or closestDistance > 3 then
                                 pickup.inRange = true
-
+                                
+                                -- Optimize animation loading and playing
                                 local dict, anim = "weapons@first_person@aim_rng@generic@projectile@sticky_bomb@", "plant_floor"
                                 ESX.Streaming.RequestAnimDict(dict)
                                 TaskPlayAnim(ESX.PlayerData.ped, dict, anim, 8.0, 1.0, 1000, 16, 0.0, false, false, false)
                                 RemoveAnimDict(dict)
                                 Wait(1000)
-
-                                TriggerServerEvent("esx:onPickup", pickupId)
+                                
+                                TriggerServerEvent("esx:onPickup", nearbyPickup.id)
                                 PlaySoundFrontend(-1, "PICK_UP", "HUD_FRONTEND_DEFAULT_SOUNDSET", false)
                             end
                         end
-
-                        label = ("%s~n~%s"):format(label, TranslateCap("threw_pickup_prompt"))
                     end
-
-                    local textCoords = pickup.coords + vector3(0.0, 0.0, 0.25)
-                    ESX.Game.Utils.DrawText3D(textCoords, label, 1.2, 1)
-                elseif pickup.inRange then
-                    pickup.inRange = false
+                    
+                    label = ("%s~n~%s"):format(label, TranslateCap("threw_pickup_prompt"))
+                end
+                
+                -- Only draw text for the closest pickup to reduce draw calls
+                local textCoords = pickup.coords + vector3(0.0, 0.0, 0.25)
+                ESX.Game.Utils.DrawText3D(textCoords, label, 1.2, 1)
+            end
+            
+            -- Clear inRange flag for pickups that are no longer close
+            for pickupId, pickup in pairs(pickups) do
+                if pickup.inRange and (not nearbyPickup or nearbyPickup.id ~= pickupId) then
+                    local distance = #(lastPlayerCoords - pickup.coords)
+                    if distance > 1.5 then
+                        pickup.inRange = false
+                    end
                 end
             end
+            
             Wait(Sleep)
         end
     end)

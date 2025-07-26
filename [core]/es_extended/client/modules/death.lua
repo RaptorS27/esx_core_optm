@@ -62,14 +62,24 @@ end
 
 AddEventHandler("esx:onPlayerSpawn", function()
     Citizen.CreateThreadNow(function()
-        while not ESX.PlayerLoaded do Wait(0) end
+        while not ESX.PlayerLoaded do Wait(100) end -- Increased wait for better performance
 
+        local lastHealthCheck = 0
+        local healthCheckInterval = Config.PerformanceOptimization.DefaultThreadWait or 500
+        
         while ESX.PlayerLoaded and not ESX.PlayerData.dead do
-            if DoesEntityExist(ESX.PlayerData.ped) and (IsPedDeadOrDying(ESX.PlayerData.ped, true) or IsPedFatallyInjured(ESX.PlayerData.ped)) then
-                Death:Died()
-                break
+            local currentTime = GetGameTimer()
+            
+            -- Check death status less frequently to reduce CPU usage
+            if currentTime - lastHealthCheck >= healthCheckInterval then
+                lastHealthCheck = currentTime
+                
+                if DoesEntityExist(ESX.PlayerData.ped) and (IsPedDeadOrDying(ESX.PlayerData.ped, true) or IsPedFatallyInjured(ESX.PlayerData.ped)) then
+                    Death:Died()
+                    break
+                end
             end
-            Citizen.Wait(250)
+            Citizen.Wait(250) -- Keep a reasonable check rate for death detection
         end
     end)
 end)

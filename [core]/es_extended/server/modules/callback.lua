@@ -10,6 +10,12 @@ Callbacks.requests = {}
 Callbacks.storage = {}
 Callbacks.id = 0
 
+-- Performance optimizations for callback system
+Callbacks.requestTimeouts = {}
+Callbacks.cleanupTimer = 0
+Callbacks.TIMEOUT_DURATION = 30000 -- 30 seconds timeout for callbacks
+Callbacks.CLEANUP_INTERVAL = 60000 -- Cleanup every minute
+
 -- =============================================
 -- MARK: Internal Functions
 -- =============================================
@@ -36,10 +42,33 @@ end
 
 function Callbacks:Trigger(player, event, cb, invoker, ...)
     self.requests[self.id] = cb
+    self.requestTimeouts[self.id] = GetGameTimer() + self.TIMEOUT_DURATION
 
     TriggerClientEvent("esx:triggerClientCallback", player, event, self.id, invoker, ...)
 
     self.id += 1
+    
+    -- Periodic cleanup of timed out requests
+    local currentTime = GetGameTimer()
+    if currentTime - self.cleanupTimer > self.CLEANUP_INTERVAL then
+        self:CleanupTimedOutRequests()
+        self.cleanupTimer = currentTime
+    end
+end
+
+function Callbacks:CleanupTimedOutRequests()
+    local currentTime = GetGameTimer()
+    for requestId, timeout in pairs(self.requestTimeouts) do
+        if currentTime > timeout then
+            if self.requests[requestId] then
+                self.requests[requestId] = nil
+                self.requestTimeouts[requestId] = nil
+                if Config.EnableDebug then
+                    print(("[^3WARNING^7] Callback request ^5%s^7 timed out and was cleaned up"):format(requestId))
+                end
+            end
+        end
+    end
 end
 
 function Callbacks:ServerRecieve(player, event, requestId, invoker, ...)
@@ -67,7 +96,10 @@ function Callbacks:RecieveClient(requestId, invoker, ...)
     local callback = self.requests[self.currentId]
 
     self:Execute(callback, ...)
+    
+    -- Clean up the completed request
     self.requests[requestId] = nil
+    self.requestTimeouts[requestId] = nil
 end
 
 -- =============================================

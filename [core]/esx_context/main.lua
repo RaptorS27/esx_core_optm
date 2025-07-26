@@ -1,18 +1,55 @@
 local activeMenu
 local Debug = ESX.GetConfig().EnableDebug
+local lastMenuState = nil
+local menuUpdateTimer = 0
+
+-- Performance optimization: batch NUI messages and reduce redundant calls
+local pendingMessages = {}
+local messageBatchTimer = 0
 
 -- Global functions
 -- [ Post | Open | Closed ]
 
 function Post(fn, ...)
-    SendNUIMessage({
+    local message = {
         func = fn,
         args = { ... },
-    })
+    }
+    
+    -- Batch messages to reduce NUI overhead
+    table.insert(pendingMessages, message)
+    
+    -- Process messages immediately for critical functions
+    if fn == "Open" or fn == "Closed" then
+        FlushPendingMessages()
+    else
+        -- Batch other messages for better performance
+        local currentTime = GetGameTimer()
+        if currentTime - messageBatchTimer > 16 then -- ~60fps batching
+            FlushPendingMessages()
+        end
+    end
+end
+
+function FlushPendingMessages()
+    if #pendingMessages > 0 then
+        for _, message in ipairs(pendingMessages) do
+            SendNUIMessage(message)
+        end
+        pendingMessages = {}
+        messageBatchTimer = GetGameTimer()
+    end
 end
 
 function Open(position, eles, onSelect, onClose, canClose)
     local canCloseMenu = canClose == nil and true or canClose
+    
+    -- Optimize: only update if menu actually changed
+    local newMenuState = json.encode({position, eles, canCloseMenu})
+    if lastMenuState == newMenuState and activeMenu then
+        return -- Menu hasn't changed, no need to reopen
+    end
+    
     activeMenu = {
         position = position,
         eles = eles,
@@ -22,6 +59,7 @@ function Open(position, eles, onSelect, onClose, canClose)
     }
 
     LocalPlayer.state:set("context:active", true)
+    lastMenuState = newMenuState
 
     Post("Open", eles, position)
 end
@@ -30,9 +68,10 @@ function Closed()
     SetNuiFocus(false, false)
 
     local menu = activeMenu
-    local cb = menu.onClose
+    local cb = menu and menu.onClose
 
     activeMenu = nil
+    lastMenuState = nil
 
     LocalPlayer.state:set("context:active", false)
 
@@ -66,10 +105,26 @@ exports("Refresh", function(eles, position)
         return
     end
 
-    activeMenu.eles = eles or activeMenu.eles
-    activeMenu.position = position or activeMenu.position
+    -- Only update if elements or position actually changed
+    local newEles = eles or activeMenu.eles
+    local newPosition = position or activeMenu.position
+    
+    if newEles == activeMenu.eles and newPosition == activeMenu.position then
+        return -- No changes, skip update
+    end
+
+    activeMenu.eles = newEles
+    activeMenu.position = newPosition
 
     Post("Open", activeMenu.eles, activeMenu.position)
+end)
+
+-- Performance optimization: batch NUI message processing
+CreateThread(function()
+    while true do
+        FlushPendingMessages()
+        Wait(16) -- ~60fps batching for non-critical messages
+    end
 end)
 
 -- NUI Callbacks

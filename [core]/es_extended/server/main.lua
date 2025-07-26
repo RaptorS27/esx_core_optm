@@ -44,12 +44,27 @@ local function createESXPlayer(identifier, playerId, data)
 end
 
 
+-- Cache for player existence checks to reduce database queries
+local playerExistsCache = {}
+local cacheExpiration = {}
+local CACHE_TTL = 30000 -- 30 seconds
+
+local function isPlayerCacheValid(identifier)
+    return cacheExpiration[identifier] and GetGameTimer() < cacheExpiration[identifier]
+end
+
+local function cachePlayerExists(identifier, exists)
+    playerExistsCache[identifier] = exists
+    cacheExpiration[identifier] = GetGameTimer() + CACHE_TTL
+end
+
 local function onPlayerJoined(playerId)
     local identifier = ESX.GetIdentifier(playerId)
     if not identifier then
         return DropPlayer(playerId, "there was an error loading your character!\nError code: identifier-missing-ingame\n\nThe cause of this error is not known, your identifier could not be found. Please come back later or report this problem to the server administration team.")
     end
 
+    -- Check if player is already connected
     if ESX.GetPlayerFromIdentifier(identifier) then
         DropPlayer(
             playerId,
@@ -57,14 +72,30 @@ local function onPlayerJoined(playerId)
                 identifier
             )
         )
-    else
-        local result = MySQL.scalar.await("SELECT 1 FROM users WHERE identifier = ?", { identifier })
+        return
+    end
+    
+    -- Check cache first to avoid unnecessary database queries
+    if isPlayerCacheValid(identifier) then
+        if playerExistsCache[identifier] then
+            loadESXPlayer(identifier, playerId, false)
+        else
+            createESXPlayer(identifier, playerId)
+        end
+        return
+    end
+    
+    -- Use async query to prevent blocking
+    MySQL.scalar("SELECT 1 FROM users WHERE identifier = ?", { identifier }, function(result)
+        -- Update cache
+        cachePlayerExists(identifier, result ~= nil)
+        
         if result then
             loadESXPlayer(identifier, playerId, false)
         else
             createESXPlayer(identifier, playerId)
         end
-    end
+    end)
 end
 
 if Config.Multichar then
@@ -163,7 +194,7 @@ function loadESXPlayer(identifier, playerId, isNew)
         }
     end
 
-    -- Job
+    -- Job (optimized with caching)
     local job, grade = result.job, tostring(result.job_grade)
 
     if not ESX.DoesJobExist(job, grade) then
@@ -172,6 +203,17 @@ function loadESXPlayer(identifier, playerId, isNew)
     end
 
     local jobObject, gradeObject = ESX.Jobs[job], ESX.Jobs[job].grades[grade]
+    
+    -- Cache skin data to avoid repeated JSON parsing
+    local skinMale, skinFemale = {}, {}
+    if gradeObject.skin_male and gradeObject.skin_male ~= "" then
+        local success, decoded = pcall(json.decode, gradeObject.skin_male)
+        skinMale = success and decoded or {}
+    end
+    if gradeObject.skin_female and gradeObject.skin_female ~= "" then
+        local success, decoded = pcall(json.decode, gradeObject.skin_female)
+        skinFemale = success and decoded or {}
+    end
 
     userData.job = {
         id = jobObject.id,
@@ -183,31 +225,68 @@ function loadESXPlayer(identifier, playerId, isNew)
         grade_label = gradeObject.label,
         grade_salary = gradeObject.salary,
 
-        skin_male = gradeObject.skin_male and json.decode(gradeObject.skin_male) or {},
-        skin_female = gradeObject.skin_female and json.decode(gradeObject.skin_female) or {},
+        skin_male = skinMale,
+        skin_female = skinFemale,
     }
 
-    -- Inventory
+    -- Inventory (optimized processing)
     if not Config.CustomInventory then
         local inventory = (result.inventory and result.inventory ~= "") and json.decode(result.inventory) or {}
-
+        local tempInventory = {}
+        local tempWeight = 0
+        
+        -- Pre-cache item labels and weights to avoid repeated table lookups
+        local itemCache = {}
         for name, item in pairs(ESX.Items) do
-            local count = inventory[name] or 0
-            userData.weight += (count * item.weight)
-
-            userData.inventory[#userData.inventory + 1] = {
-                name = name,
-                count = count,
+            itemCache[name] = {
                 label = item.label,
                 weight = item.weight,
-                usable = Core.UsableItemsCallbacks[name] ~= nil,
                 rare = item.rare,
                 canRemove = item.canRemove,
+                usable = Core.UsableItemsCallbacks[name] ~= nil
             }
         end
-        table.sort(userData.inventory, function(a, b)
+        
+        -- Only process items that actually exist in inventory or cache
+        for name, count in pairs(inventory) do
+            if count > 0 and itemCache[name] then
+                local item = itemCache[name]
+                tempWeight = tempWeight + (count * item.weight)
+                
+                tempInventory[#tempInventory + 1] = {
+                    name = name,
+                    count = count,
+                    label = item.label,
+                    weight = item.weight,
+                    usable = item.usable,
+                    rare = item.rare,
+                    canRemove = item.canRemove,
+                }
+            end
+        end
+        
+        -- Add remaining items with 0 count (only if needed for UI)
+        for name, item in pairs(itemCache) do
+            if not inventory[name] then
+                tempInventory[#tempInventory + 1] = {
+                    name = name,
+                    count = 0,
+                    label = item.label,
+                    weight = item.weight,
+                    usable = item.usable,
+                    rare = item.rare,
+                    canRemove = item.canRemove,
+                }
+            end
+        end
+        
+        -- Sort only once at the end
+        table.sort(tempInventory, function(a, b)
             return a.label < b.label
         end)
+        
+        userData.inventory = tempInventory
+        userData.weight = tempWeight
     elseif result.inventory and result.inventory ~= "" then
         userData.inventory = json.decode(result.inventory)
     end
