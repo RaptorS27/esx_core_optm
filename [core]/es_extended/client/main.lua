@@ -15,10 +15,15 @@ ESX.UI.Menu.Opened = {}
 ESX.Game = {}
 ESX.Game.Utils = {}
 
+-- Optimized player loading thread with exponential backoff
 CreateThread(function()
-    while not Config.Multichar do
-        Wait(100)
-
+    if Config.Multichar then return end -- Early return if multichar is enabled
+    
+    local checkInterval = 100
+    local maxInterval = 1000
+    local attempts = 0
+    
+    while true do
         if NetworkIsPlayerActive(ESX.playerId) then
             ESX.DisableSpawnManager()
             DoScreenFadeOut(0)
@@ -26,5 +31,13 @@ CreateThread(function()
             TriggerServerEvent("esx:onPlayerJoined")
             break
         end
+        
+        -- Exponential backoff to reduce CPU usage while waiting
+        attempts = attempts + 1
+        if attempts > 5 then
+            checkInterval = math.min(checkInterval * 1.2, maxInterval)
+        end
+        
+        Wait(checkInterval)
     end
 end)

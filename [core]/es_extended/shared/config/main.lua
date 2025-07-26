@@ -52,6 +52,24 @@ Config.DistanceGive = 4.0 -- Max distance when giving items, weapons etc.
 
 Config.AdminLogging = false -- Logs the usage of certain commands by those with group.admin ace permissions (default is false)
 
+-- Performance Optimization Settings
+Config.PerformanceOptimization = {
+    -- Pickup system optimizations
+    PickupCheckInterval = 500,      -- How often (ms) to update pickup distances (default: 500)
+    PickupDrawDistance = 5.0,       -- Max distance to draw pickup text (default: 5.0)
+    PickupInteractDistance = 1.2,   -- Max distance to interact with pickups (default: 1.2)
+    
+    -- Weapon sync optimizations  
+    WeaponCheckInterval = 500,      -- How often (ms) to check weapon changes (default: 500)
+    WeaponAmmoSyncRate = 250,       -- Minimum ms between ammo sync updates (default: 250)
+    
+    -- Database optimizations
+    PlayerCacheTTL = 30000,         -- Player existence cache TTL in ms (default: 30000)
+    
+    -- Thread optimizations
+    DefaultThreadWait = 500,        -- Default wait time for optimized threads (default: 500)
+}
+
 -------------------------------------
 -- DO NOT CHANGE BELOW THIS LINE !!!
 -------------------------------------
